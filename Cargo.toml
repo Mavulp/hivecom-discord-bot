@@ -1,0 +1,22 @@
+[package]
+name = "discord-bot"
+version = "0.1.0"
+authors = ["Jokler <jokler.contact@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+log4rs = "0.8.3"
+log = "0.4.8"
+xml-rs = "0.8.0"
+failure = "0.1.5"
+reqwest = "0.9.19"
+url = "2.1.0"
+rand = "0.7.0"
+bincode = "1.1.4"
+circular-queue = "0.2.1"
+rawr = { git = "https://github.com/Jokler/rawr" }
+env_logger = "0.6.2"
+
+[dependencies.serenity]
+version = "0.6.3"
+features = ["client", "standard_framework", "voice"]

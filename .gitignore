@@ -1,0 +1,4 @@
+/target
+**/*.rs.bk
+/bot_token.txt
+/db
