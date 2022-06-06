@@ -14,18 +14,18 @@ use serenity::prelude::*;
 #[description("Searches danbooru.donmai.us for images and returns one at random.")]
 #[usage("TAGS")]
 #[only_in(guilds)]
-fn danbooru(ctx: &mut Context, msg: &Message) -> CommandResult {
-    let channel = if let Channel::Guild(channel) = msg.channel_id.to_channel(&ctx).unwrap() {
+async fn danbooru(ctx: &Context, msg: &Message) -> CommandResult {
+    let channel = if let Channel::Guild(channel) = msg.channel_id.to_channel(&ctx).await.unwrap() {
         channel
     } else {
         check_msg(
             msg.channel_id
-                .say(&ctx.http, "Groups and DMs not supported"),
+                .say(&ctx.http, "Groups and DMs not supported")
+                .await,
         );
 
         return Ok(());
     };
-    let channel = channel.read();
 
     let content = &msg.content;
     let tags = content
@@ -41,33 +41,41 @@ fn danbooru(ctx: &mut Context, msg: &Message) -> CommandResult {
         .replace(',', " ");
 
     if tags.is_empty() {
-        check_msg(msg.channel_id.say(&ctx.http, "Specify at least one tag"));
+        check_msg(
+            msg.channel_id
+                .say(&ctx.http, "Specify at least one tag")
+                .await,
+        );
         return Ok(());
     }
 
     if !channel.nsfw {
         if tags.find("rating:").is_some() {
-            check_msg(msg.channel_id.say(
-                &ctx.http,
-                "You can only specify the rating in NSFW channels",
-            ));
+            check_msg(
+                msg.channel_id
+                    .say(
+                        &ctx.http,
+                        "You can only specify the rating in NSFW channels",
+                    )
+                    .await,
+            );
             return Ok(());
         } else {
             tags.push_str(" rating:s");
         }
     }
 
-    let response = match get_url(&tags) {
+    let response = match get_url(&tags).await {
         Ok(v) => v,
         Err(e) => e.to_string(),
     };
 
-    check_msg(msg.channel_id.say(&ctx.http, &response));
+    check_msg(msg.channel_id.say(&ctx.http, &response).await);
 
     Ok(())
 }
 
-fn get_url(tags: &str) -> Result<String> {
+async fn get_url(tags: &str) -> Result<String> {
     let url: String = form_urlencoded::Serializer::new(String::from(
         "http://danbooru.donmai.us/posts.xml?random=true",
     ))
@@ -75,16 +83,20 @@ fn get_url(tags: &str) -> Result<String> {
     .append_pair("tags", tags)
     .finish();
 
-    get_attribute(&url, "file-url")
+    get_attribute(&url, "file-url").await
 }
 
-fn get_attribute(url: &str, xml_name: &str) -> Result<String> {
+async fn get_attribute(url: &str, xml_name: &str) -> Result<String> {
     let response = Client::new()
         .get(url)
         .header(header::CONNECTION, "close")
-        .send()?;
+        .send()
+        .await?
+        .bytes()
+        .await?;
 
-    let parser = EventReader::new(response);
+    let content = String::from_utf8_lossy(&response);
+    let parser = EventReader::from_str(&content);
 
     let mut iter = parser.into_iter();
     while let Some(ev) = iter.next() {

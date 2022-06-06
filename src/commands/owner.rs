@@ -6,14 +6,17 @@ use serenity::prelude::*;
 
 #[command]
 #[owners_only]
-fn quit(ctx: &mut Context, msg: &Message) -> CommandResult {
-    let data = ctx.data.read();
+async fn quit(ctx: &Context, msg: &Message) -> CommandResult {
+    let data = ctx.data.read().await;
 
     if let Some(manager) = data.get::<ShardManagerContainer>() {
-        let _ = msg.reply(&ctx, "Shutting down!").unwrap();
-        manager.lock().shutdown_all();
+        let _ = msg.reply(&ctx, "Shutting down!").await.unwrap();
+        manager.lock().await.shutdown_all().await;
     } else {
-        check_msg(msg.reply(&ctx, "There was a problem getting the shard manager"));
+        check_msg(
+            msg.reply(&ctx, "There was a problem getting the shard manager")
+                .await,
+        );
 
         return Ok(());
     }

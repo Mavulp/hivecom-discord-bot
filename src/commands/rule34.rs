@@ -14,23 +14,24 @@ use serenity::prelude::*;
 #[description("Searches rule34.xxx for images and returns one at random.")]
 #[usage("TAGS")]
 #[only_in(guilds)]
-fn rule34(ctx: &mut Context, msg: &Message) -> CommandResult {
-    let channel = if let Channel::Guild(channel) = msg.channel_id.to_channel(&ctx).unwrap() {
+async fn rule34(ctx: &Context, msg: &Message) -> CommandResult {
+    let channel = if let Channel::Guild(channel) = msg.channel_id.to_channel(&ctx).await.unwrap() {
         channel
     } else {
         check_msg(
             msg.channel_id
-                .say(&ctx.http, "Groups and DMs not supported"),
+                .say(&ctx.http, "Groups and DMs not supported")
+                .await,
         );
 
         return Ok(());
     };
-    let channel = channel.read();
 
     if !channel.nsfw {
         check_msg(
             msg.channel_id
-                .say(&ctx.http, "This command only works in NSFW channels"),
+                .say(&ctx.http, "This command only works in NSFW channels")
+                .await,
         );
 
         return Ok(());
@@ -50,21 +51,27 @@ fn rule34(ctx: &mut Context, msg: &Message) -> CommandResult {
         .replace(',', " ");
 
     if tags.is_empty() {
-        check_msg(msg.channel_id.say(&ctx.http, "Specify at least one tag"));
+        check_msg(
+            msg.channel_id
+                .say(&ctx.http, "Specify at least one tag")
+                .await,
+        );
         return Ok(());
     }
 
-    let response = match get_amount(&tags) {
+    let response = match get_amount(&tags).await {
         Ok(amount) => {
             if amount < 1 {
-                check_msg(msg.channel_id.say(&ctx.http, "No Results"));
+                check_msg(msg.channel_id.say(&ctx.http, "No Results").await);
                 return Ok(());
             }
 
-            let mut rng = thread_rng();
-            let rand: u64 = rng.gen_range(0, amount);
+            let rand: u64 = {
+                let mut rng = thread_rng();
+                rng.gen_range(0..amount)
+            };
 
-            match get_url(&tags, rand) {
+            match get_url(&tags, rand).await {
                 Ok(v) => v,
                 Err(e) => e.to_string(),
             }
@@ -72,12 +79,12 @@ fn rule34(ctx: &mut Context, msg: &Message) -> CommandResult {
         Err(e) => e.to_string(),
     };
 
-    check_msg(msg.channel_id.say(&ctx.http, &response));
+    check_msg(msg.channel_id.say(&ctx.http, &response).await);
 
     Ok(())
 }
 
-fn get_amount(tags: &str) -> Result<u64> {
+async fn get_amount(tags: &str) -> Result<u64> {
     use std::str::FromStr;
 
     let url: String = form_urlencoded::Serializer::new(String::from(
@@ -88,10 +95,10 @@ fn get_amount(tags: &str) -> Result<u64> {
     .append_pair("tags", tags)
     .finish();
 
-    Ok(u64::from_str(&get_attribute(&url, "count")?)?)
+    Ok(u64::from_str(&get_attribute(&url, "count").await?)?)
 }
 
-fn get_url(tags: &str, pid: u64) -> Result<String> {
+async fn get_url(tags: &str, pid: u64) -> Result<String> {
     let url: String = form_urlencoded::Serializer::new(String::from(
         "https://rule34.xxx/index.php?page=dapi&s=post&q=index",
     ))
@@ -100,18 +107,22 @@ fn get_url(tags: &str, pid: u64) -> Result<String> {
     .append_pair("tags", tags)
     .finish();
 
-    get_attribute(&url, "file_url")
+    get_attribute(&url, "file_url").await
 }
 
-fn get_attribute(url: &str, name: &str) -> Result<String> {
+async fn get_attribute(url: &str, name: &str) -> Result<String> {
     use xml::reader::{EventReader, XmlEvent};
 
     let response = Client::new()
         .post(url)
         .header(header::CONNECTION, "close")
-        .send()?;
+        .send()
+        .await?
+        .bytes()
+        .await?;
 
-    let parser = EventReader::new(response);
+    let content = String::from_utf8_lossy(&response);
+    let parser = EventReader::from_str(&content);
 
     for ev in parser {
         match ev {

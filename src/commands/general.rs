@@ -27,37 +27,41 @@ use crate::Result;
 #[description("Gets an unseen URL from the last 500 on a subreddit of choice.")]
 #[usage("SUBREDDIT <comments> <AGE>")]
 #[only_in(guilds)]
-fn reddit(ctx: &mut Context, msg: &Message, mut args: Args) -> CommandResult {
+async fn reddit(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
     let subreddit = match args.single::<String>() {
         Ok(s) => s,
         Err(_) => {
-            check_msg(msg.channel_id.say(&ctx.http, "Must provide an argument"));
+            check_msg(
+                msg.channel_id
+                    .say(&ctx.http, "Must provide an argument")
+                    .await,
+            );
 
             return Ok(());
         }
     };
 
-    let channel = if let Channel::Guild(channel) = msg.channel_id.to_channel(&ctx).unwrap() {
+    let channel = if let Channel::Guild(channel) = msg.channel_id.to_channel(&ctx).await.unwrap() {
         channel
     } else {
         check_msg(
             msg.channel_id
-                .say(&ctx.http, "Groups and DMs not supported"),
+                .say(&ctx.http, "Groups and DMs not supported")
+                .await,
         );
 
         return Ok(());
     };
-    let channel = channel.read();
 
     let result = {
-        let mut data = ctx.data.write();
+        let mut data = ctx.data.write().await;
         let reddit = data
             .get_mut::<Reddit>()
             .expect("RedditSearch is in ShareMap.");
 
         if let Ok(arg) = args.single::<String>() {
             if arg != "comments" {
-                check_msg(msg.channel_id.say(&ctx.http, "Unknown argument"));
+                check_msg(msg.channel_id.say(&ctx.http, "Unknown argument").await);
                 return Ok(());
             }
             let count = args.single::<usize>().unwrap_or(1);
@@ -73,9 +77,9 @@ fn reddit(ctx: &mut Context, msg: &Message, mut args: Args) -> CommandResult {
     };
 
     match result {
-        Ok(url) => check_msg(msg.channel_id.say(&ctx.http, &url)),
+        Ok(url) => check_msg(msg.channel_id.say(&ctx.http, &url).await),
         //TODO Err msg
-        Err(e) => check_msg(msg.channel_id.say(&ctx.http, &e.to_string())),
+        Err(e) => check_msg(msg.channel_id.say(&ctx.http, &e.to_string()).await),
     }
 
     Ok(())
@@ -147,21 +151,24 @@ impl RedditSearch {
 #[description("Creates a temporary channel that will get removed once empty.")]
 #[usage("<name>")]
 #[only_in(guilds)]
-fn temporary_channel(ctx: &mut Context, msg: &Message) -> CommandResult {
+async fn temporary_channel(ctx: &Context, msg: &Message) -> CommandResult {
     let guild = match msg.guild(&ctx.cache) {
         Some(guild) => guild,
         None => {
-            check_msg(msg.reply(&ctx, "Groups and DMs are not supported"));
+            check_msg(msg.reply(&ctx, "Groups and DMs are not supported").await);
 
             return Ok(());
         }
     };
 
-    if let None = guild.read().voice_states.get(&msg.author.id) {
-        check_msg(msg.reply(
-            &ctx,
-            "You must be in a voice channel to create a temporary channel",
-        ));
+    if let None = guild.voice_states.get(&msg.author.id) {
+        check_msg(
+            msg.reply(
+                &ctx,
+                "You must be in a voice channel to create a temporary channel",
+            )
+            .await,
+        );
 
         return Ok(());
     };
@@ -173,18 +180,21 @@ fn temporary_channel(ctx: &mut Context, msg: &Message) -> CommandResult {
         .unwrap_or("Temporary Channel");
 
     let channel = match guild
-        .read()
         .create_channel(&ctx, |c| c.name(&name).kind(ChannelType::Voice))
+        .await
     {
         Ok(c) => c,
         Err(e) => {
-            check_msg(msg.reply(&ctx, &format!("Failed to create channel: {}", e)));
+            check_msg(
+                msg.reply(&ctx, &format!("Failed to create channel: {}", e))
+                    .await,
+            );
             return Ok(());
         }
     };
 
     let result = {
-        let mut data = ctx.data.write();
+        let mut data = ctx.data.write().await;
         let chan_store = data
             .get_mut::<ChannelStore>()
             .expect("ChannelStore is in ShareMap.");
@@ -193,36 +203,35 @@ fn temporary_channel(ctx: &mut Context, msg: &Message) -> CommandResult {
 
     if let Err(e) = result {
         error!("Failed to save temp channel: {}", e);
-        check_msg(msg.reply(&ctx, "Failed to store temporary channel"));
-        ctx.http.delete_channel(channel.id.0)?;
+        check_msg(msg.reply(&ctx, "Failed to store temporary channel").await);
+        ctx.http.delete_channel(channel.id.0).await?;
         return Ok(());
     }
 
     if let Err(e) = guild
-        .read()
         .move_member(&ctx.http, msg.author.id, channel.id)
+        .await
     {
         error!("Failed to move user: {}", e);
-        check_msg(msg.reply(&ctx, "Failed to move user"));
-        ctx.http.delete_channel(channel.id.0)?;
+        check_msg(msg.reply(&ctx, "Failed to move user").await);
+        ctx.http.delete_channel(channel.id.0).await?;
         return Ok(());
     }
 
     Ok(())
 }
 
-pub fn check_temp_chans(ctx: &Context, guild_id: &GuildId) {
+pub async fn check_temp_chans(ctx: &Context, guild_id: &GuildId) {
     let guild = guild_id
         .to_guild_cached(&ctx.cache)
         .expect("Guild is cached");
 
-    let guild = guild.read();
-    let mut data = ctx.data.write();
+    let mut data = ctx.data.write().await;
     let chan_store = data
         .get_mut::<ChannelStore>()
         .expect("ChannelStore is in ShareMap.");
 
-    if let Ok(channels) = guild.channels(&ctx.http) {
+    if let Ok(channels) = guild.channels(&ctx.http).await {
         for (channel_id, _) in channels {
             if chan_store.contains(&channel_id) {
                 if guild
@@ -232,7 +241,7 @@ pub fn check_temp_chans(ctx: &Context, guild_id: &GuildId) {
                     .count()
                     < 1
                 {
-                    if let Err(e) = ctx.http.delete_channel(channel_id.0) {
+                    if let Err(e) = ctx.http.delete_channel(channel_id.0).await {
                         error!("Failed to delete temporary channel: {}", e);
                     } else {
                         if let Err(e) = chan_store.remove_chan(&channel_id) {

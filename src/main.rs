@@ -3,14 +3,15 @@ use std::fs::File;
 use std::io::Read;
 use std::sync::Arc;
 
-use serenity::client::bridge::voice::ClientVoiceManager;
+use serenity::async_trait;
 use serenity::client::Client;
 use serenity::framework::standard::{
     help_commands,
     macros::{command, group, help},
     Args, CommandGroup, CommandResult, HelpOptions,
 };
-use serenity::model::id::{GuildId, UserId};
+use serenity::http::Http;
+use serenity::model::id::UserId;
 use serenity::model::voice::VoiceState;
 use serenity::model::{channel::Message, gateway::Ready};
 use serenity::prelude::{Context, EventHandler};
@@ -33,12 +34,6 @@ impl TypeMapKey for ShardManagerContainer {
     type Value = Arc<Mutex<ShardManager>>;
 }
 
-struct VoiceManager;
-
-impl TypeMapKey for VoiceManager {
-    type Value = Arc<Mutex<ClientVoiceManager>>;
-}
-
 struct ChannelStore;
 
 impl TypeMapKey for ChannelStore {
@@ -53,8 +48,9 @@ impl TypeMapKey for Reddit {
 
 struct Handler;
 
+#[async_trait]
 impl EventHandler for Handler {
-    fn ready(&self, _: Context, ready: Ready) {
+    async fn ready(&self, _: Context, ready: Ready) {
         if let Some(shard) = ready.shard {
             info!(
                 "{} is connected on shard {}/{}!",
@@ -64,51 +60,38 @@ impl EventHandler for Handler {
             );
         }
     }
-    fn voice_state_update(
-        &self,
-        ctx: Context,
-        guild_id: Option<GuildId>,
-        _: Option<VoiceState>,
-        _: VoiceState,
-    ) {
-        if let Some(id) = guild_id {
-            check_temp_chans(&ctx, &id);
+    async fn voice_state_update(&self, ctx: Context, _: Option<VoiceState>, state: VoiceState) {
+        if let Some(id) = state.guild_id {
+            check_temp_chans(&ctx, &id).await;
         }
     }
 }
 
 #[help]
-fn my_help(
-    context: &mut Context,
+async fn my_help(
+    context: &Context,
     msg: &Message,
     args: Args,
     help_options: &'static HelpOptions,
     groups: &[&'static CommandGroup],
     owners: HashSet<UserId>,
 ) -> CommandResult {
-    help_commands::with_embeds(context, msg, args, help_options, groups, owners)
+    let _ = help_commands::with_embeds(context, msg, args, help_options, groups, owners).await;
+    Ok(())
 }
 
-group!({
-    name: "general",
-    options: {},
-    commands: [reddit, temporary_channel, ping, quit]
-});
+#[group]
+#[summary = "The normal commands"]
+#[commands(reddit, temporary_channel, ping, quit)]
+struct General;
 
-// ytdl/ffmpeg integration bad
-//group!({
-//name: "voice",
-//options: {},
-//commands: [join, play, leave]
-//});
+#[group]
+#[summary = "The other commands"]
+#[commands(rule34, danbooru)]
+struct Nsfw;
 
-group!({
-    name: "nsfw",
-    options: {},
-    commands: [rule34, danbooru]
-});
-
-fn main() {
+#[tokio::main]
+async fn main() {
     env_logger::init();
 
     let mut token_file = File::open("bot_token.txt").unwrap();
@@ -116,17 +99,9 @@ fn main() {
     token_file.read_to_string(&mut token).unwrap();
     token = token.trim().to_owned();
 
-    let mut client = Client::new(&token, Handler).expect("Err creating client");
+    let http = Http::new(&token);
 
-    {
-        let mut data = client.data.write();
-        data.insert::<VoiceManager>(Arc::clone(&client.voice_manager));
-        data.insert::<ShardManagerContainer>(Arc::clone(&client.shard_manager));
-        data.insert::<ChannelStore>(TempChannelStore::new());
-        data.insert::<Reddit>(RedditSearch::new());
-    }
-
-    let owners = match client.cache_and_http.http.get_current_application_info() {
+    let owners = match http.get_current_application_info().await {
         Ok(info) => {
             let mut set = HashSet::new();
             set.insert(info.owner.id);
@@ -136,24 +111,36 @@ fn main() {
         Err(why) => panic!("Couldn't get application info: {:?}", why),
     };
 
-    client.with_framework(
-        StandardFramework::new()
-            .configure(|c| c.owners(owners).prefix("!"))
-            .group(&GENERAL_GROUP)
-            //.group(&VOICE_GROUP)
-            .group(&NSFW_GROUP)
-            .help(&MY_HELP),
-    );
+    let framework = StandardFramework::new()
+        .configure(|c| c.owners(owners).prefix("!"))
+        .group(&GENERAL_GROUP)
+        .group(&NSFW_GROUP)
+        .help(&MY_HELP);
+
+    let intents = GatewayIntents::all();
+    let mut client = Client::builder(&token, intents)
+        .event_handler(Handler)
+        .framework(framework)
+        .type_map_insert::<ChannelStore>(TempChannelStore::new())
+        .type_map_insert::<Reddit>(RedditSearch::new())
+        .await
+        .expect("Err creating client");
+
+    {
+        let mut data = client.data.write().await;
+        data.insert::<ShardManagerContainer>(Arc::clone(&client.shard_manager));
+    }
 
     let _ = client
         .start()
+        .await
         .map_err(|why| error!("Client ended: {:?}", why));
 }
 
 #[command]
 #[description("Replies with \"Pong!\".")]
-fn ping(ctx: &mut Context, msg: &Message) -> CommandResult {
-    check_msg(msg.reply(&ctx, "Pong!"));
+async fn ping(ctx: &Context, msg: &Message) -> CommandResult {
+    check_msg(msg.reply(&ctx, "Pong!").await);
 
     Ok(())
 }
