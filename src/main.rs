@@ -1,32 +1,19 @@
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::sync::Arc;
 
-use serenity::async_trait;
+use commands::general::RedditSearch;
+use poise::{command, say_reply, ReplyHandle};
 use serenity::client::Client;
-use serenity::framework::standard::{
-    help_commands,
-    macros::{command, group, help},
-    Args, CommandGroup, CommandResult, HelpOptions,
-};
-use serenity::http::Http;
-use serenity::model::id::UserId;
-use serenity::model::voice::VoiceState;
-use serenity::model::{channel::Message, gateway::Ready};
-use serenity::prelude::{Context, EventHandler};
-use serenity::{
-    client::bridge::gateway::ShardManager, framework::StandardFramework, prelude::*,
-    Result as SerenityResult,
-};
+use serenity::{gateway::ShardManager, prelude::*, Result as SerenityResult};
 
-use log::{error, info};
+use log::error;
 
 mod commands;
+use commands::*;
 
-use commands::{danbooru::*, general::*, owner::*, rule34::*};
-
-type Result<T> = ::std::result::Result<T, failure::Error>;
+type CommandError = Box<dyn std::error::Error + Send + Sync>;
+type Result<T> = ::std::result::Result<T, CommandError>;
 
 struct ShardManagerContainer;
 
@@ -34,61 +21,44 @@ impl TypeMapKey for ShardManagerContainer {
     type Value = Arc<Mutex<ShardManager>>;
 }
 
-struct ChannelStore;
-
-impl TypeMapKey for ChannelStore {
-    type Value = TempChannelStore;
+struct Data {
+    reddit: Arc<Mutex<RedditSearch>>,
+    //chan_store: Arc<Mutex<TempChannelStore>>,
 }
+type Error = Box<dyn std::error::Error + Send + Sync>;
+type Context<'a> = poise::Context<'a, Data, Error>;
 
-struct Reddit;
+//struct Handler;
 
-impl TypeMapKey for Reddit {
-    type Value = RedditSearch;
-}
+//#[async_trait]
+//impl EventHandler for Handler {
+//async fn voice_state_update(
+//&self,
+//ctx: serenity::client::Context,
+//_: Option<VoiceState>,
+//state: VoiceState,
+//) {
+//if let Some(id) = state.guild_id {
+//check_temp_chans(&ctx, &id).await;
+//}
+//}
+//}
 
-struct Handler;
-
-#[async_trait]
-impl EventHandler for Handler {
-    async fn ready(&self, _: Context, ready: Ready) {
-        if let Some(shard) = ready.shard {
-            info!(
-                "{} is connected on shard {}/{}!",
-                ready.user.name,
-                shard[0] + 1,
-                shard[1],
-            );
-        }
-    }
-    async fn voice_state_update(&self, ctx: Context, _: Option<VoiceState>, state: VoiceState) {
-        if let Some(id) = state.guild_id {
-            check_temp_chans(&ctx, &id).await;
-        }
-    }
-}
-
-#[help]
-async fn my_help(
-    context: &Context,
-    msg: &Message,
-    args: Args,
-    help_options: &'static HelpOptions,
-    groups: &[&'static CommandGroup],
-    owners: HashSet<UserId>,
-) -> CommandResult {
-    let _ = help_commands::with_embeds(context, msg, args, help_options, groups, owners).await;
+/// Show this menu
+#[command(track_edits, prefix_command)]
+pub async fn help(
+    ctx: Context<'_>,
+    #[description = "Specific command to show help about"] command: Option<String>,
+) -> Result<()> {
+    let config = poise::builtins::HelpConfiguration {
+        extra_text_at_bottom: "\
+Type !help command for more info on a command.
+You can edit your message to the bot and the bot will edit its response.",
+        ..Default::default()
+    };
+    poise::builtins::help(ctx, command.as_deref(), config).await?;
     Ok(())
 }
-
-#[group]
-#[summary = "The normal commands"]
-#[commands(reddit, temporary_channel, ping, quit)]
-struct General;
-
-#[group]
-#[summary = "The other commands"]
-#[commands(rule34, danbooru)]
-struct Nsfw;
 
 #[tokio::main]
 async fn main() {
@@ -99,53 +69,62 @@ async fn main() {
     token_file.read_to_string(&mut token).unwrap();
     token = token.trim().to_owned();
 
-    let http = Http::new(&token);
+    let framework = poise::Framework::builder()
+        .options(poise::FrameworkOptions {
+            prefix_options: poise::PrefixFrameworkOptions {
+                prefix: Some("!".into()),
+                edit_tracker: Some(Arc::new(poise::EditTracker::for_timespan(
+                    std::time::Duration::from_secs(3600),
+                ))),
+                case_insensitive_commands: true,
+                ..Default::default()
+            },
+            commands: vec![
+                help(),
+                ping(),
+                general::reddit(),
+                //general::tempchan(),
+                rule34::rule34(),
+            ],
+            ..Default::default()
+        })
+        .setup(|ctx, _ready, framework| {
+            Box::pin(async move {
+                poise::builtins::register_globally(ctx, &framework.options().commands).await?;
+                Ok(Data {
+                    reddit: Arc::new(Mutex::new(RedditSearch::new())),
+                    //chan_store: Arc::new(Mutex::new(TempChannelStore::new())),
+                })
+            })
+        })
+        .build();
 
-    let owners = match http.get_current_application_info().await {
-        Ok(info) => {
-            let mut set = HashSet::new();
-            set.insert(info.owner.id);
-
-            set
-        }
-        Err(why) => panic!("Couldn't get application info: {:?}", why),
-    };
-
-    let framework = StandardFramework::new()
-        .configure(|c| c.owners(owners).prefix("!"))
-        .group(&GENERAL_GROUP)
-        .group(&NSFW_GROUP)
-        .help(&MY_HELP);
-
-    let intents = GatewayIntents::all();
+    let intents = GatewayIntents::non_privileged().union(GatewayIntents::MESSAGE_CONTENT);
     let mut client = Client::builder(&token, intents)
-        .event_handler(Handler)
+        //.event_handler(Handler)
         .framework(framework)
-        .type_map_insert::<ChannelStore>(TempChannelStore::new())
-        .type_map_insert::<Reddit>(RedditSearch::new())
         .await
         .expect("Err creating client");
 
-    {
-        let mut data = client.data.write().await;
-        data.insert::<ShardManagerContainer>(Arc::clone(&client.shard_manager));
-    }
+    //{
+    //let mut data = client.data.write().await;
+    //data.insert::<ShardManagerContainer>(Arc::clone(&client.shard_manager));
+    //}
 
-    let _ = client
-        .start()
-        .await
-        .map_err(|why| error!("Client ended: {:?}", why));
+    if let Err(error) = client.start().await {
+        error!("Client ended: {:?}", error)
+    }
 }
 
-#[command]
-#[description("Replies with \"Pong!\".")]
-async fn ping(ctx: &Context, msg: &Message) -> CommandResult {
-    check_msg(msg.reply(&ctx, "Pong!").await);
+/// Replies with "Pong!".
+#[command(prefix_command)]
+async fn ping(ctx: Context<'_>) -> Result<()> {
+    check_msg(say_reply(ctx, "Pong!").await);
 
     Ok(())
 }
 
-fn check_msg(result: SerenityResult<Message>) {
+fn check_msg(result: SerenityResult<ReplyHandle<'_>>) {
     if let Err(why) = result {
         error!("Error sending message: {:?}", why);
     }

@@ -1,12 +1,11 @@
 use std::collections::HashMap;
-use std::fs::OpenOptions;
-use std::io::ErrorKind::NotFound as FileNotFound;
+//use std::fs::OpenOptions;
+//use std::io::ErrorKind::NotFound as FileNotFound;
 
-use serenity::framework::standard::{macros::command, Args, CommandResult};
-use serenity::model::channel::Message;
+//use poise::serenity_prelude::CreateChannel;
+use poise::{command, say_reply};
 use serenity::model::id::ChannelId;
 use serenity::model::prelude::*;
-use serenity::prelude::*;
 
 use rawr::auth::AnonymousAuthenticator;
 use rawr::client::RedditClient;
@@ -15,71 +14,42 @@ use rawr::traits::{Content, Stickable};
 
 use circular_queue::CircularQueue;
 
-use failure::format_err;
-use log::error;
-
 use crate::check_msg;
-use crate::ChannelStore;
-use crate::Reddit;
+use crate::Context;
 use crate::Result;
 
-#[command]
-#[description("Gets an unseen URL from the last 500 on a subreddit of choice.")]
-#[usage("SUBREDDIT <comments> <AGE>")]
-#[only_in(guilds)]
-async fn reddit(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
-    let subreddit = match args.single::<String>() {
-        Ok(s) => s,
-        Err(_) => {
-            check_msg(
-                msg.channel_id
-                    .say(&ctx.http, "Must provide an argument")
-                    .await,
-            );
-
-            return Ok(());
-        }
-    };
-
-    let channel = if let Channel::Guild(channel) = msg.channel_id.to_channel(&ctx).await.unwrap() {
+/// Gets an unseen URL from the last 100 on a subreddit of choice.
+#[command(prefix_command, guild_only, track_edits)]
+pub async fn reddit(
+    ctx: Context<'_>,
+    subreddit: String,
+    count: Option<usize>,
+    #[flag] comments: bool,
+) -> Result<()> {
+    let channel = if let Channel::Guild(channel) = ctx.channel_id().to_channel(&ctx).await.unwrap()
+    {
         channel
     } else {
-        check_msg(
-            msg.channel_id
-                .say(&ctx.http, "Groups and DMs not supported")
-                .await,
-        );
-
-        return Ok(());
+        unreachable!("Guild only command");
     };
 
     let result = {
-        let mut data = ctx.data.write().await;
-        let reddit = data
-            .get_mut::<Reddit>()
-            .expect("RedditSearch is in ShareMap.");
+        let mut reddit = ctx.data().reddit.lock().await;
 
-        if let Ok(arg) = args.single::<String>() {
-            if arg != "comments" {
-                check_msg(msg.channel_id.say(&ctx.http, "Unknown argument").await);
-                return Ok(());
-            }
-            let count = args.single::<usize>().unwrap_or(1);
-            match reddit.get_comments(subreddit.clone(), msg.channel_id, count - 1) {
+        if comments {
+            match reddit.get_comments(subreddit.clone(), ctx.channel_id(), count.unwrap_or(1) - 1) {
                 Some((sub, id)) => Ok(format!("https://reddit.com/r/{}/comments/{}/", sub, id)),
-                None => Err(format_err!(
-                    "No post for that subreddit was sent previously"
-                )),
+                None => Err(String::from("No post for that subreddit was sent previously").into()),
             }
         } else {
-            reddit.get_post(subreddit, msg.channel_id, channel.nsfw)
+            reddit.get_post(subreddit, ctx.channel_id(), channel.nsfw)
         }
     };
 
     match result {
-        Ok(url) => check_msg(msg.channel_id.say(&ctx.http, &url).await),
+        Ok(url) => check_msg(say_reply(ctx, &url).await),
         //TODO Err msg
-        Err(e) => check_msg(msg.channel_id.say(&ctx.http, &e.to_string()).await),
+        Err(e) => check_msg(say_reply(ctx, &e.to_string()).await),
     }
 
     Ok(())
@@ -107,7 +77,7 @@ impl RedditSearch {
         let known = self
             .known
             .entry((channel, sub))
-            .or_insert(CircularQueue::with_capacity(500));
+            .or_insert(CircularQueue::with_capacity(100));
 
         known.iter().nth(count).map(|s| s.clone())
     }
@@ -120,9 +90,9 @@ impl RedditSearch {
         let known = self
             .known
             .entry((channel, sub))
-            .or_insert(CircularQueue::with_capacity(500));
+            .or_insert(CircularQueue::with_capacity(100));
 
-        for post in hot.take(1000) {
+        for post in hot.take(100) {
             if post.stickied() || (!nsfw && post.nsfw()) {
                 continue;
             }
@@ -138,186 +108,164 @@ impl RedditSearch {
             }
         }
         if nsfw {
-            Err(format_err!("Found no URLs in most recent 1000 posts"))
+            Err(String::from("Found no URLs in most recent 100 posts").into())
         } else {
-            Err(format_err!(
-                "Found no SFW URLs in the most recent 1000 posts"
-            ))
+            Err(String::from("Found no SFW URLs in the most recent 100 posts").into())
         }
     }
 }
 
-#[command("tempchan")]
-#[description("Creates a temporary channel that will get removed once empty.")]
-#[usage("<name>")]
-#[only_in(guilds)]
-async fn temporary_channel(ctx: &Context, msg: &Message) -> CommandResult {
-    let guild = match msg.guild(&ctx.cache) {
-        Some(guild) => guild,
-        None => {
-            check_msg(msg.reply(&ctx, "Groups and DMs are not supported").await);
+///// Creates a temporary channel that will get removed once empty.
+//#[command(prefix_command, guild_only, track_edits)]
+//pub async fn tempchan(ctx: Context<'_>, name: String) -> Result<()> {
+//let guild_id = ctx.guild_id().expect("guild only command");
 
-            return Ok(());
-        }
-    };
+//let author_in_voice = ctx
+//.guild()
+//.expect("guild only command")
+//.voice_states
+//.get(&ctx.author().id)
+//.is_some();
 
-    if let None = guild.voice_states.get(&msg.author.id) {
-        check_msg(
-            msg.reply(
-                &ctx,
-                "You must be in a voice channel to create a temporary channel",
-            )
-            .await,
-        );
+//if !author_in_voice {
+//check_msg(
+//say_reply(
+//ctx,
+//"You must be in a voice channel to create a temporary channel",
+//)
+//.await,
+//);
 
-        return Ok(());
-    };
+//return Ok(());
+//};
 
-    let name = msg
-        .content
-        .find(' ')
-        .map(|start| &msg.content[start + 1..])
-        .unwrap_or("Temporary Channel");
+//let channel = match guild_id
+//.create_channel(&ctx, CreateChannel::new(name).kind(ChannelType::Voice))
+//.await
+//{
+//Ok(c) => c,
+//Err(e) => {
+//check_msg(say_reply(ctx, &format!("Failed to create channel: {}", e)).await);
+//return Ok(());
+//}
+//};
 
-    let channel = match guild
-        .create_channel(&ctx, |c| c.name(&name).kind(ChannelType::Voice))
-        .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            check_msg(
-                msg.reply(&ctx, &format!("Failed to create channel: {}", e))
-                    .await,
-            );
-            return Ok(());
-        }
-    };
+//let result = {
+//let mut chan_store = ctx.data().chan_store.lock().await;
+//chan_store.add_chan(&channel.id)
+//};
 
-    let result = {
-        let mut data = ctx.data.write().await;
-        let chan_store = data
-            .get_mut::<ChannelStore>()
-            .expect("ChannelStore is in ShareMap.");
-        chan_store.add_chan(&channel.id)
-    };
+//if let Err(e) = result {
+//error!("Failed to save temp channel: {}", e);
+//check_msg(say_reply(ctx, "Failed to store temporary channel").await);
+//ctx.channel_id().delete(ctx.http()).await?;
+//return Ok(());
+//}
 
-    if let Err(e) = result {
-        error!("Failed to save temp channel: {}", e);
-        check_msg(msg.reply(&ctx, "Failed to store temporary channel").await);
-        ctx.http.delete_channel(channel.id.0).await?;
-        return Ok(());
-    }
+//if let Err(e) = guild_id
+//.move_member(ctx.http(), ctx.author().id, channel.id)
+//.await
+//{
+//error!("Failed to move user: {}", e);
+//check_msg(say_reply(ctx, "Failed to move user").await);
+//channel.delete(ctx.http()).await?;
+//}
 
-    if let Err(e) = guild
-        .move_member(&ctx.http, msg.author.id, channel.id)
-        .await
-    {
-        error!("Failed to move user: {}", e);
-        check_msg(msg.reply(&ctx, "Failed to move user").await);
-        ctx.http.delete_channel(channel.id.0).await?;
-        return Ok(());
-    }
+//Ok(())
+//}
 
-    Ok(())
-}
+//pub async fn check_temp_chans(ctx: &serenity::client::Context, guild_id: &GuildId) {
+//let guild = ctx.guild().expect("guild only command");
 
-pub async fn check_temp_chans(ctx: &Context, guild_id: &GuildId) {
-    let guild = guild_id
-        .to_guild_cached(&ctx.cache)
-        .expect("Guild is cached");
+//let mut chan_store = ctx.data().chan_store.lock().await;
 
-    let mut data = ctx.data.write().await;
-    let chan_store = data
-        .get_mut::<ChannelStore>()
-        .expect("ChannelStore is in ShareMap.");
+//if let Ok(channels) = guild.channels(ctx.http).await {
+//for (channel_id, _) in channels {
+//if chan_store.contains(&channel_id) {
+//if guild
+//.voice_states
+//.iter()
+//.filter(|(_, vs)| vs.channel_id.map(|id| channel_id == id) == Some(true))
+//.count()
+//< 1
+//{
+//if let Err(e) = channel_id.delete(ctx.http).await {
+//error!("Failed to delete temporary channel: {}", e);
+//} else {
+//if let Err(e) = chan_store.remove_chan(&channel_id) {
+//error!("{}", e);
+//}
+//}
+//}
+//}
+//}
+//}
+//}
 
-    if let Ok(channels) = guild.channels(&ctx.http).await {
-        for (channel_id, _) in channels {
-            if chan_store.contains(&channel_id) {
-                if guild
-                    .voice_states
-                    .iter()
-                    .filter(|(_, vs)| vs.channel_id.map(|id| channel_id == id) == Some(true))
-                    .count()
-                    < 1
-                {
-                    if let Err(e) = ctx.http.delete_channel(channel_id.0).await {
-                        error!("Failed to delete temporary channel: {}", e);
-                    } else {
-                        if let Err(e) = chan_store.remove_chan(&channel_id) {
-                            error!("{}", e);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
+//pub struct TempChannelStore {
+//temp_chans: Vec<u64>,
+//}
 
-pub struct TempChannelStore {
-    temp_chans: Vec<u64>,
-}
+//impl TempChannelStore {
+//pub fn new() -> Self {
+//let result = OpenOptions::new().read(true).open("db/channels.bin");
 
-impl TempChannelStore {
-    pub fn new() -> Self {
-        let result = OpenOptions::new().read(true).open("db/channels.bin");
+//match result {
+//Ok(f) => {
+//let chans: Vec<u64> = match bincode::deserialize_from(f) {
+//Ok(cs) => cs,
+//Err(e) => {
+//error!("Failed to deserialize channels: {}", e);
+//Vec::new()
+//}
+//};
 
-        match result {
-            Ok(f) => {
-                let chans: Vec<u64> = match bincode::deserialize_from(f) {
-                    Ok(cs) => cs,
-                    Err(e) => {
-                        error!("Failed to deserialize channels: {}", e);
-                        Vec::new()
-                    }
-                };
+//TempChannelStore { temp_chans: chans }
+//}
+//Err(e) => {
+//// FIXME What
+//if FileNotFound != e.kind() {
+//error!("Failed to open channel file: {}", e);
+//}
 
-                TempChannelStore { temp_chans: chans }
-            }
-            Err(e) => {
-                // FIXME What
-                if FileNotFound != e.kind() {
-                    error!("Failed to open channel file: {}", e);
-                }
+//TempChannelStore {
+//temp_chans: Vec::new(),
+//}
+//}
+//}
+//}
 
-                TempChannelStore {
-                    temp_chans: Vec::new(),
-                }
-            }
-        }
-    }
+//pub fn add_chan(&mut self, id: &ChannelId) -> Result<()> {
+//self.temp_chans.push(id.get());
+//let file = OpenOptions::new()
+//.write(true)
+//.create(true)
+//.open("db/channels.bin")?;
 
-    pub fn add_chan(&mut self, id: &ChannelId) -> Result<()> {
-        self.temp_chans.push(id.0);
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open("db/channels.bin")?;
+//bincode::serialize_into(file, &self.temp_chans)?;
 
-        bincode::serialize_into(file, &self.temp_chans)?;
+//Ok(())
+//}
+//pub fn remove_chan(&mut self, id: &ChannelId) -> Result<()> {
+//let idx = self
+//.temp_chans
+//.iter()
+//.enumerate()
+//.find(|&(_, c)| c == &id.get())
+//.map(|(i, _)| i)
+//.ok_or(String::from("ChannelId not found"))?;
+//self.temp_chans.remove(idx);
 
-        Ok(())
-    }
-    pub fn remove_chan(&mut self, id: &ChannelId) -> Result<()> {
-        let idx = self
-            .temp_chans
-            .iter()
-            .enumerate()
-            .find(|&(_, c)| c == &id.0)
-            .map(|(i, _)| i)
-            .ok_or(format_err!("ChannelId not found"))?;
-        self.temp_chans.remove(idx);
+//let file = OpenOptions::new()
+//.write(true)
+//.create(true)
+//.open("db/channels.bin")?;
 
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open("db/channels.bin")?;
+//bincode::serialize_into(file, &self.temp_chans)?;
+//Ok(())
+//}
 
-        bincode::serialize_into(file, &self.temp_chans)?;
-        Ok(())
-    }
-
-    pub fn contains(&self, id: &ChannelId) -> bool {
-        self.temp_chans.contains(&id.0)
-    }
-}
+//pub fn contains(&self, id: &ChannelId) -> bool {
+//self.temp_chans.contains(&id.get())
+//}
+//}

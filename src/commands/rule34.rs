@@ -1,46 +1,30 @@
-use failure::bail;
+use poise::{command, say_reply};
 use rand::{thread_rng, Rng};
 use reqwest::{header, Client};
 use url::form_urlencoded;
 
 use crate::check_msg;
 use crate::Result;
-use serenity::framework::standard::{macros::command, CommandResult};
-use serenity::model::prelude::*;
-use serenity::prelude::*;
 
-#[command]
-#[aliases(r34)]
-#[description("Searches rule34.xxx for images and returns one at random.")]
-#[usage("TAGS")]
-#[only_in(guilds)]
-async fn rule34(ctx: &Context, msg: &Message) -> CommandResult {
-    let channel = if let Channel::Guild(channel) = msg.channel_id.to_channel(&ctx).await.unwrap() {
-        channel
-    } else {
-        check_msg(
-            msg.channel_id
-                .say(&ctx.http, "Groups and DMs not supported")
-                .await,
-        );
+use crate::Context;
 
-        return Ok(());
-    };
-
-    if !channel.nsfw {
-        check_msg(
-            msg.channel_id
-                .say(&ctx.http, "This command only works in NSFW channels")
-                .await,
-        );
-
-        return Ok(());
-    }
-
-    let content = &msg.content;
-    let tags = content
+/// Searches rule34.xxx for images and returns one at random.
+#[command(
+    prefix_command,
+    guild_only,
+    nsfw_only,
+    aliases("r34"),
+    track_edits,
+    category = "nsfw"
+)]
+pub async fn rule34(
+    ctx: Context<'_>,
+    #[description = "Comma separated tags"]
+    #[rest]
+    tags: String,
+) -> Result<()> {
+    let tags = tags
         .split(' ')
-        .skip(1)
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>();
     // TODO Terrible
@@ -50,19 +34,10 @@ async fn rule34(ctx: &Context, msg: &Message) -> CommandResult {
         .replace(' ', "_")
         .replace(',', " ");
 
-    if tags.is_empty() {
-        check_msg(
-            msg.channel_id
-                .say(&ctx.http, "Specify at least one tag")
-                .await,
-        );
-        return Ok(());
-    }
-
     let response = match get_amount(&tags).await {
         Ok(amount) => {
             if amount < 1 {
-                check_msg(msg.channel_id.say(&ctx.http, "No Results").await);
+                check_msg(say_reply(ctx, "No Results").await);
                 return Ok(());
             }
 
@@ -79,7 +54,7 @@ async fn rule34(ctx: &Context, msg: &Message) -> CommandResult {
         Err(e) => e.to_string(),
     };
 
-    check_msg(msg.channel_id.say(&ctx.http, &response).await);
+    check_msg(say_reply(ctx, &response).await);
 
     Ok(())
 }
@@ -131,12 +106,12 @@ async fn get_attribute(url: &str, name: &str) -> Result<String> {
                     if attr.name.local_name == name {
                         return Ok(attr.value.clone());
                     } else if attr.name.local_name == "reason" {
-                        bail!("No results: {}", attr.value);
+                        return Err(format!("No results: {}", attr.value).into());
                     }
                 }
             }
             _ => (),
         }
     }
-    bail!("API deserialization failed");
+    return Err(String::from("API deserialization failed").into());
 }
